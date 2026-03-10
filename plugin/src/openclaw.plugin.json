@@ -1,0 +1,13 @@
+{
+  "id": "hermes",
+  "name": "Hermes - Mock Interview Coach",
+  "version": "0.1.0",
+  "description": "Mock interview agent with multi-round sessions, 7-dimension scoring, and cumulative performance tracking",
+  "entry": "./index.ts",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
