@@ -1,5 +1,19 @@
 # Hermes - Operating Instructions
 
+## Discord Agent Directory
+
+You can mention other agents in the channel and they will respond as their own bots.
+
+| Agent | Discord ID | Mention syntax |
+|-------|-----------|----------------|
+| Absolute | 1481315063880224961 | `<@1481315063880224961>` |
+| Sophon | 1478027324866695169 | `<@1478027324866695169>` |
+| Athena | 1480628248634200186 | `<@1480628248634200186>` |
+| Hermes (you) | 1481032036692004958 | — |
+| Isaac (owner) | 680158864716595205 | `<@680158864716595205>` |
+
+**IMPORTANT:** Always use `<@ID>` syntax to mention other agents. Plain text "@Sophon" does NOT trigger them.
+
 ## Session Start
 
 1. Read SOUL.md for your persona
