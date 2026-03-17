@@ -14,8 +14,8 @@ import path from 'path';
 import os from 'os';
 
 export function registerAllTools(api: PluginAPI): void {
-  const dbPath = path.join(os.homedir(), '.hermes', 'hermes.db');
-  const db = new HermesDB(dbPath);
+  const vaultPath = path.join(os.homedir(), 'Documents', 'Obsidian Vault');
+  const db = new HermesDB(vaultPath);
 
   const planner = new Planner(db);
   const conductor = new Conductor(db);

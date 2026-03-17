@@ -1,7 +1,5 @@
-import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
-import path from 'path';
+import { ObsidianAdapter } from 'obsidian-adapter';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -68,113 +66,111 @@ export interface Drill {
   created_at: string;
 }
 
-// ── Schema (inlined for reliable resolution across module systems) ───────────
+// ── Exchange parsing helpers ────────────────────────────────────────────────
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS job_descriptions (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  company TEXT,
-  raw_text TEXT NOT NULL,
-  requirements TEXT,
-  seniority_level TEXT CHECK (seniority_level IN ('junior', 'mid', 'senior', 'staff', 'lead')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+const EXCHANGE_TAG_RE = /<!-- exchange:([^:]+):seq=(\d+):source=(.*?) -->/;
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  jd_id TEXT NOT NULL REFERENCES job_descriptions(id),
-  status TEXT NOT NULL DEFAULT 'planning' CHECK (status IN ('planning', 'approved', 'in_progress', 'completed')),
-  plan TEXT,
-  overall_score REAL,
-  overall_feedback TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  completed_at TEXT
-);
+function formatExchange(ex: Exchange): string {
+  const source = ex.answer_source ?? '';
+  let block = `### Q${ex.sequence} (${ex.created_at})\n\n**Question:**\n${ex.question_text}\n`;
+  if (ex.answer_text) {
+    block += `\n**Answer:**\n${ex.answer_text}\n`;
+  }
+  block += `\n<!-- exchange:${ex.id}:seq=${ex.sequence}:source=${source} -->`;
+  return block;
+}
 
-CREATE TABLE IF NOT EXISTS rounds (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
-  round_number INTEGER NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('experience_screen', 'technical', 'behavioral', 'culture_fit', 'hiring_manager')),
-  title TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'completed', 'scored', 'skipped')),
-  questions TEXT,
-  started_at TEXT,
-  completed_at TEXT
-);
+function parseExchanges(body: string, roundId: string): Exchange[] {
+  const exchanges: Exchange[] = [];
+  const blocks = body.split(/(?=^### Q\d+)/m);
 
-CREATE TABLE IF NOT EXISTS exchanges (
-  id TEXT PRIMARY KEY,
-  round_id TEXT NOT NULL REFERENCES rounds(id),
-  sequence INTEGER NOT NULL,
-  question_text TEXT NOT NULL,
-  answer_text TEXT,
-  answer_source TEXT CHECK (answer_source IN ('text', 'voice_transcription')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+  for (const block of blocks) {
+    const headerMatch = block.match(/^### Q(\d+) \((\S+)\)/);
+    const tagMatch = block.match(EXCHANGE_TAG_RE);
+    if (!headerMatch || !tagMatch) continue;
 
-CREATE TABLE IF NOT EXISTS scores (
-  id TEXT PRIMARY KEY,
-  round_id TEXT NOT NULL REFERENCES rounds(id),
-  dimension TEXT NOT NULL,
-  score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
-  evidence TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+    const questionMatch = block.match(/\*\*Question:\*\*\n([\s\S]*?)(?=\n\*\*Answer:\*\*|\n<!-- exchange:)/);
+    const answerMatch = block.match(/\*\*Answer:\*\*\n([\s\S]*?)(?=\n<!-- exchange:)/);
 
-CREATE TABLE IF NOT EXISTS drills (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
-  round_id TEXT REFERENCES rounds(id),
-  dimension TEXT NOT NULL,
-  exercise_text TEXT NOT NULL,
-  priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 3),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'practiced')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+    exchanges.push({
+      id: tagMatch[1],
+      round_id: roundId,
+      sequence: parseInt(headerMatch[1], 10),
+      question_text: questionMatch ? questionMatch[1].trim() : '',
+      answer_text: answerMatch ? answerMatch[1].trim() : null,
+      answer_source: tagMatch[3] || null,
+      created_at: headerMatch[2],
+    });
+  }
+  return exchanges.sort((a, b) => a.sequence - b.sequence);
+}
 
-CREATE INDEX IF NOT EXISTS idx_sessions_jd ON sessions(jd_id);
-CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
-CREATE INDEX IF NOT EXISTS idx_exchanges_round ON exchanges(round_id);
-CREATE INDEX IF NOT EXISTS idx_scores_round ON scores(round_id);
-CREATE INDEX IF NOT EXISTS idx_scores_dimension ON scores(dimension);
-CREATE INDEX IF NOT EXISTS idx_drills_session ON drills(session_id);
-CREATE INDEX IF NOT EXISTS idx_drills_dimension ON drills(dimension);
-`;
+// ── Score parsing helpers ───────────────────────────────────────────────────
+
+const SCORE_ROW_RE = /^\| (.+?) \| (\d) \| (.+?) \| (.+?) \| (.+?) \|$/;
+
+function parseScores(body: string, roundId: string): Score[] {
+  const scores: Score[] = [];
+  const lines = body.split('\n');
+
+  for (const line of lines) {
+    const match = line.match(SCORE_ROW_RE);
+    if (!match) continue;
+    const dimension = match[1].trim();
+    const score = parseInt(match[2], 10);
+    const evidence = match[3].trim();
+    const created = match[4].trim();
+    const id = match[5].trim();
+
+    if (id === 'ID') continue; // header row
+
+    scores.push({
+      id,
+      round_id: roundId,
+      dimension,
+      score,
+      evidence: evidence === '-' ? null : evidence,
+      created_at: created,
+    });
+  }
+  return scores.sort((a, b) => a.dimension.localeCompare(b.dimension));
+}
+
+function buildScoreTable(scores: Score[]): string {
+  if (scores.length === 0) return '';
+  let table = '\n## Scores\n\n';
+  table += '| Dimension | Score | Evidence | Created | ID |\n';
+  table += '| --- | --- | --- | --- | --- |\n';
+  for (const s of scores) {
+    table += `| ${s.dimension} | ${s.score} | ${s.evidence ?? '-'} | ${s.created_at} | ${s.id} |\n`;
+  }
+  return table;
+}
 
 // ── HermesDB ─────────────────────────────────────────────────────────────────
 
 export class HermesDB {
-  private db: Database.Database;
+  private adapter: ObsidianAdapter;
 
-  constructor(dbPath: string) {
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+  constructor(vaultPath: string) {
+    this.adapter = new ObsidianAdapter(vaultPath, 'Agents/Hermes');
 
-    this.db = new Database(dbPath);
-
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-
-    this.db.exec(SCHEMA);
+    this.adapter.ensureFolder('Job Descriptions');
+    this.adapter.ensureFolder('Sessions');
+    this.adapter.ensureFolder('Rounds');
+    this.adapter.ensureFolder('Drills');
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   close(): void {
-    this.db.close();
+    // No-op for Obsidian adapter
   }
 
   // ── Introspection ───────────────────────────────────────────────────────
 
   listTables(): string[] {
-    const rows = this.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-      .all() as { name: string }[];
-    return rows.map((r) => r.name);
+    return ['job_descriptions', 'sessions', 'rounds', 'exchanges', 'scores', 'drills'];
   }
 
   // ── Job Descriptions ────────────────────────────────────────────────────
@@ -188,24 +184,33 @@ export class HermesDB {
   ): JobDescription {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        'INSERT INTO job_descriptions (id, title, company, raw_text, requirements, seniority_level, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      )
-      .run(id, title, company ?? null, rawText, requirements ?? null, seniorityLevel ?? null, now);
+    const companyPart = company ? ` - ${this.adapter.sanitize(company)}` : '';
+    const filename = `${this.adapter.sanitize(title)}${companyPart} - ${this.adapter.shortId(id)}.md`;
+
+    this.adapter.createNote('Job Descriptions', filename, {
+      id,
+      type: 'hermes-jd',
+      title,
+      company: company ?? null,
+      requirements: requirements ?? null,
+      seniority_level: seniorityLevel ?? null,
+      created_at: now,
+      tags: ['hermes', 'jd'],
+    }, `# ${title}\n\n${rawText}\n`);
+
     return this.getJobDescription(id)!;
   }
 
   getJobDescription(id: string): JobDescription | undefined {
-    return this.db
-      .prepare('SELECT * FROM job_descriptions WHERE id = ?')
-      .get(id) as JobDescription | undefined;
+    const entry = this.adapter.findById(id);
+    if (!entry || entry.frontmatter.type !== 'hermes-jd') return undefined;
+    return this.jdFromEntry(entry);
   }
 
   getAllJobDescriptions(): JobDescription[] {
-    return this.db
-      .prepare('SELECT * FROM job_descriptions ORDER BY created_at DESC')
-      .all() as JobDescription[];
+    return this.adapter.findByType('hermes-jd')
+      .map(e => this.jdFromEntry(e))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   // ── Sessions ────────────────────────────────────────────────────────────
@@ -213,66 +218,99 @@ export class HermesDB {
   createSession(jdId: string): Session {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        "INSERT INTO sessions (id, jd_id, status, created_at) VALUES (?, ?, 'planning', ?)"
-      )
-      .run(id, jdId, now);
+
+    // Determine folder name from JD title
+    const jd = this.getJobDescription(jdId);
+    const jdTitle = jd ? this.adapter.sanitize(jd.title) : jdId.slice(0, 8);
+    const folderPath = `Sessions/${jdTitle}`;
+    this.adapter.ensureFolder(folderPath);
+
+    const filename = `${this.adapter.shortId(id)}.md`;
+
+    this.adapter.createNote(folderPath, filename, {
+      id,
+      type: 'hermes-session',
+      jd_id: jdId,
+      status: 'planning',
+      overall_score: null,
+      created_at: now,
+      completed_at: null,
+      tags: ['hermes', 'session'],
+    }, `# Interview Session\n\n## Plan\n\n## Debrief\n`);
+
     return this.getSession(id)!;
   }
 
   getSession(id: string): Session | undefined {
-    return this.db
-      .prepare('SELECT * FROM sessions WHERE id = ?')
-      .get(id) as Session | undefined;
+    const entry = this.adapter.findById(id);
+    if (!entry || entry.frontmatter.type !== 'hermes-session') return undefined;
+    return this.sessionFromEntry(entry);
   }
 
   getActiveSession(): Session | undefined {
-    return this.db
-      .prepare(
-        "SELECT * FROM sessions WHERE status IN ('planning', 'approved', 'in_progress') ORDER BY created_at DESC LIMIT 1"
-      )
-      .get() as Session | undefined;
+    const activeStatuses = ['planning', 'approved', 'in_progress'];
+    const sessions = this.adapter.findByType('hermes-session')
+      .filter(e => activeStatuses.includes(e.frontmatter.status as string))
+      .map(e => this.sessionFromEntry(e))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return sessions[0];
   }
 
   updateSessionStatus(id: string, status: string): void {
+    const entry = this.adapter.findById(id);
+    if (!entry) return;
     const now = new Date().toISOString();
+    const updates: Record<string, unknown> = { status };
     if (status === 'completed') {
-      this.db
-        .prepare('UPDATE sessions SET status = ?, completed_at = ? WHERE id = ?')
-        .run(status, now, id);
-    } else {
-      this.db
-        .prepare('UPDATE sessions SET status = ? WHERE id = ?')
-        .run(status, id);
+      updates.completed_at = now;
     }
+    this.adapter.updateFrontmatter(entry.relativePath, updates);
   }
 
   updateSessionPlan(id: string, plan: string): void {
-    this.db
-      .prepare('UPDATE sessions SET plan = ? WHERE id = ?')
-      .run(plan, id);
+    const entry = this.adapter.findById(id);
+    if (!entry) return;
+    const note = this.adapter.readNote(entry.relativePath);
+    if (!note) return;
+
+    let body = note.body;
+    body = body.replace(
+      /## Plan\n[\s\S]*?(?=\n## Debrief)/,
+      `## Plan\n\n${plan}\n\n`
+    );
+    this.adapter.replaceBody(entry.relativePath, body);
   }
 
   updateSessionDebrief(id: string, overallScore: number, overallFeedback: string): void {
-    this.db
-      .prepare('UPDATE sessions SET overall_score = ?, overall_feedback = ? WHERE id = ?')
-      .run(overallScore, overallFeedback, id);
+    const entry = this.adapter.findById(id);
+    if (!entry) return;
+
+    this.adapter.updateFrontmatter(entry.relativePath, {
+      overall_score: overallScore,
+    });
+
+    const note = this.adapter.readNote(entry.relativePath);
+    if (!note) return;
+
+    let body = note.body;
+    // Replace everything after ## Debrief
+    const debriefIndex = body.indexOf('## Debrief');
+    if (debriefIndex !== -1) {
+      body = body.slice(0, debriefIndex) + `## Debrief\n\n**Overall Score:** ${overallScore}/5\n\n${overallFeedback}\n`;
+    }
+    this.adapter.replaceBody(entry.relativePath, body);
   }
 
   getCompletedSessions(limit?: number): Session[] {
+    let sessions = this.adapter.findByType('hermes-session')
+      .filter(e => e.frontmatter.status === 'completed')
+      .map(e => this.sessionFromEntry(e))
+      .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''));
+
     if (limit !== undefined) {
-      return this.db
-        .prepare(
-          "SELECT * FROM sessions WHERE status = 'completed' ORDER BY completed_at DESC LIMIT ?"
-        )
-        .all(limit) as Session[];
+      sessions = sessions.slice(0, limit);
     }
-    return this.db
-      .prepare(
-        "SELECT * FROM sessions WHERE status = 'completed' ORDER BY completed_at DESC"
-      )
-      .all() as Session[];
+    return sessions;
   }
 
   // ── Rounds ──────────────────────────────────────────────────────────────
@@ -285,57 +323,68 @@ export class HermesDB {
     questions?: string
   ): Round {
     const id = uuidv4();
-    this.db
-      .prepare(
-        "INSERT INTO rounds (id, session_id, round_number, type, title, status, questions) VALUES (?, ?, ?, ?, ?, 'pending', ?)"
-      )
-      .run(id, sessionId, roundNumber, type, title, questions ?? null);
+    const session = this.getSession(sessionId);
+    const sessionShortId = this.adapter.shortId(sessionId);
+    const folderPath = `Rounds/${sessionShortId}`;
+    this.adapter.ensureFolder(folderPath);
+
+    const filename = `R${roundNumber} - ${this.adapter.sanitize(title)}.md`;
+
+    this.adapter.createNote(folderPath, filename, {
+      id,
+      type: 'hermes-round',
+      session_id: sessionId,
+      round_number: roundNumber,
+      round_type: type,
+      title,
+      status: 'pending',
+      started_at: null,
+      completed_at: null,
+      tags: ['hermes', 'round'],
+    }, `# R${roundNumber}: ${title}\n\n## Questions\n\n${questions ?? ''}\n\n## Exchanges\n`);
+
     return this.getRound(id)!;
   }
 
   getRound(id: string): Round | undefined {
-    return this.db
-      .prepare('SELECT * FROM rounds WHERE id = ?')
-      .get(id) as Round | undefined;
+    const entry = this.adapter.findById(id);
+    if (!entry || entry.frontmatter.type !== 'hermes-round') return undefined;
+    return this.roundFromEntry(entry);
   }
 
   getSessionRounds(sessionId: string): Round[] {
-    return this.db
-      .prepare('SELECT * FROM rounds WHERE session_id = ? ORDER BY round_number ASC')
-      .all(sessionId) as Round[];
+    return this.adapter.findByType('hermes-round')
+      .filter(e => e.frontmatter.session_id === sessionId)
+      .map(e => this.roundFromEntry(e))
+      .sort((a, b) => a.round_number - b.round_number);
   }
 
   getNextPendingRound(sessionId: string): Round | undefined {
-    return this.db
-      .prepare(
-        "SELECT * FROM rounds WHERE session_id = ? AND status = 'pending' ORDER BY round_number ASC LIMIT 1"
-      )
-      .get(sessionId) as Round | undefined;
+    const rounds = this.adapter.findByType('hermes-round')
+      .filter(e => e.frontmatter.session_id === sessionId && e.frontmatter.status === 'pending')
+      .map(e => this.roundFromEntry(e))
+      .sort((a, b) => a.round_number - b.round_number);
+    return rounds[0];
   }
 
   getActiveRound(sessionId: string): Round | undefined {
-    return this.db
-      .prepare(
-        "SELECT * FROM rounds WHERE session_id = ? AND status = 'active' LIMIT 1"
-      )
-      .get(sessionId) as Round | undefined;
+    const rounds = this.adapter.findByType('hermes-round')
+      .filter(e => e.frontmatter.session_id === sessionId && e.frontmatter.status === 'active')
+      .map(e => this.roundFromEntry(e));
+    return rounds[0];
   }
 
   updateRoundStatus(id: string, status: string): void {
+    const entry = this.adapter.findById(id);
+    if (!entry) return;
     const now = new Date().toISOString();
+    const updates: Record<string, unknown> = { status };
     if (status === 'active') {
-      this.db
-        .prepare('UPDATE rounds SET status = ?, started_at = ? WHERE id = ?')
-        .run(status, now, id);
+      updates.started_at = now;
     } else if (status === 'completed' || status === 'scored') {
-      this.db
-        .prepare('UPDATE rounds SET status = ?, completed_at = ? WHERE id = ?')
-        .run(status, now, id);
-    } else {
-      this.db
-        .prepare('UPDATE rounds SET status = ? WHERE id = ?')
-        .run(status, id);
+      updates.completed_at = now;
     }
+    this.adapter.updateFrontmatter(entry.relativePath, updates);
   }
 
   // ── Exchanges ───────────────────────────────────────────────────────────
@@ -343,38 +392,71 @@ export class HermesDB {
   createExchange(roundId: string, sequence: number, questionText: string): Exchange {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        'INSERT INTO exchanges (id, round_id, sequence, question_text, created_at) VALUES (?, ?, ?, ?, ?)'
-      )
-      .run(id, roundId, sequence, questionText, now);
-    return this.getExchange(id)!;
+    const ex: Exchange = {
+      id,
+      round_id: roundId,
+      sequence,
+      question_text: questionText,
+      answer_text: null,
+      answer_source: null,
+      created_at: now,
+    };
+
+    const entry = this.adapter.findById(roundId);
+    if (!entry) throw new Error(`Round ${roundId} not found`);
+
+    this.adapter.appendToBody(entry.relativePath, formatExchange(ex));
+    return ex;
   }
 
   getExchange(id: string): Exchange | undefined {
-    return this.db
-      .prepare('SELECT * FROM exchanges WHERE id = ?')
-      .get(id) as Exchange | undefined;
+    const rounds = this.adapter.findByType('hermes-round');
+    for (const entry of rounds) {
+      const note = this.adapter.readNote(entry.relativePath);
+      if (!note) continue;
+      const exchanges = parseExchanges(note.body, entry.frontmatter.id as string);
+      const found = exchanges.find(e => e.id === id);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   getRoundExchanges(roundId: string): Exchange[] {
-    return this.db
-      .prepare('SELECT * FROM exchanges WHERE round_id = ? ORDER BY sequence ASC')
-      .all(roundId) as Exchange[];
+    const entry = this.adapter.findById(roundId);
+    if (!entry) return [];
+    const note = this.adapter.readNote(entry.relativePath);
+    if (!note) return [];
+    return parseExchanges(note.body, roundId);
   }
 
   getLatestExchange(roundId: string): Exchange | undefined {
-    return this.db
-      .prepare(
-        'SELECT * FROM exchanges WHERE round_id = ? ORDER BY sequence DESC LIMIT 1'
-      )
-      .get(roundId) as Exchange | undefined;
+    const exchanges = this.getRoundExchanges(roundId);
+    return exchanges.length > 0 ? exchanges[exchanges.length - 1] : undefined;
   }
 
   recordAnswer(exchangeId: string, answerText: string, source: string): void {
-    this.db
-      .prepare('UPDATE exchanges SET answer_text = ?, answer_source = ? WHERE id = ?')
-      .run(answerText, source, exchangeId);
+    const rounds = this.adapter.findByType('hermes-round');
+    for (const entry of rounds) {
+      const note = this.adapter.readNote(entry.relativePath);
+      if (!note) continue;
+      if (!note.body.includes(`exchange:${exchangeId}`)) continue;
+
+      const exchanges = parseExchanges(note.body, entry.frontmatter.id as string);
+      const target = exchanges.find(e => e.id === exchangeId);
+      if (!target) continue;
+
+      target.answer_text = answerText;
+      target.answer_source = source;
+
+      const newBody = note.body.replace(
+        new RegExp(
+          `### Q${target.sequence} \\(${target.created_at.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\n[\\s\\S]*?<!-- exchange:${exchangeId}:seq=\\d+:source=.*? -->`
+        ),
+        formatExchange(target)
+      );
+      this.adapter.replaceBody(entry.relativePath, newBody);
+      return;
+    }
   }
 
   // ── Scores ──────────────────────────────────────────────────────────────
@@ -387,37 +469,67 @@ export class HermesDB {
   ): Score {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        'INSERT INTO scores (id, round_id, dimension, score, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-      )
-      .run(id, roundId, dimension, score, evidence ?? null, now);
-    return this.getScore(id)!;
+    const s: Score = {
+      id,
+      round_id: roundId,
+      dimension,
+      score,
+      evidence: evidence ?? null,
+      created_at: now,
+    };
+
+    const entry = this.adapter.findById(roundId);
+    if (!entry) throw new Error(`Round ${roundId} not found`);
+
+    const note = this.adapter.readNote(entry.relativePath);
+    if (!note) throw new Error(`Round note not readable: ${roundId}`);
+
+    // Get existing scores, add the new one, rebuild the table
+    const existing = parseScores(note.body, roundId);
+    existing.push(s);
+
+    // Remove old scores section if present, then append new one
+    let body = note.body.replace(/\n## Scores\n[\s\S]*$/, '');
+    body = body.trimEnd() + '\n' + buildScoreTable(existing);
+
+    this.adapter.replaceBody(entry.relativePath, body);
+    return s;
   }
 
   getScore(id: string): Score | undefined {
-    return this.db
-      .prepare('SELECT * FROM scores WHERE id = ?')
-      .get(id) as Score | undefined;
+    const rounds = this.adapter.findByType('hermes-round');
+    for (const entry of rounds) {
+      const note = this.adapter.readNote(entry.relativePath);
+      if (!note) continue;
+      const scores = parseScores(note.body, entry.frontmatter.id as string);
+      const found = scores.find(s => s.id === id);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   getRoundScores(roundId: string): Score[] {
-    return this.db
-      .prepare('SELECT * FROM scores WHERE round_id = ? ORDER BY dimension ASC')
-      .all(roundId) as Score[];
+    const entry = this.adapter.findById(roundId);
+    if (!entry) return [];
+    const note = this.adapter.readNote(entry.relativePath);
+    if (!note) return [];
+    return parseScores(note.body, roundId);
   }
 
   getScoresByDimension(dimension: string, limit?: number): Score[] {
-    if (limit !== undefined) {
-      return this.db
-        .prepare(
-          'SELECT * FROM scores WHERE dimension = ? ORDER BY created_at DESC LIMIT ?'
-        )
-        .all(dimension, limit) as Score[];
+    const allScores: Score[] = [];
+    const rounds = this.adapter.findByType('hermes-round');
+    for (const entry of rounds) {
+      const note = this.adapter.readNote(entry.relativePath);
+      if (!note) continue;
+      const scores = parseScores(note.body, entry.frontmatter.id as string);
+      allScores.push(...scores.filter(s => s.dimension === dimension));
     }
-    return this.db
-      .prepare('SELECT * FROM scores WHERE dimension = ? ORDER BY created_at DESC')
-      .all(dimension) as Score[];
+    allScores.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    if (limit !== undefined) {
+      return allScores.slice(0, limit);
+    }
+    return allScores;
   }
 
   // ── Drills ──────────────────────────────────────────────────────────────
@@ -431,53 +543,145 @@ export class HermesDB {
   ): Drill {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        "INSERT INTO drills (id, session_id, round_id, dimension, exercise_text, priority, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)"
-      )
-      .run(id, sessionId, roundId ?? null, dimension, exerciseText, priority, now);
+    const filename = `${this.adapter.sanitize(dimension)} - ${this.adapter.shortId(id)}.md`;
+
+    this.adapter.createNote('Drills', filename, {
+      id,
+      type: 'hermes-drill',
+      session_id: sessionId,
+      round_id: roundId ?? null,
+      dimension,
+      priority,
+      status: 'pending',
+      created_at: now,
+      tags: ['hermes', 'drill'],
+    }, `# Drill: ${dimension}\n\n${exerciseText}\n`);
+
     return this.getDrill(id)!;
   }
 
   getDrill(id: string): Drill | undefined {
-    return this.db
-      .prepare('SELECT * FROM drills WHERE id = ?')
-      .get(id) as Drill | undefined;
+    const entry = this.adapter.findById(id);
+    if (!entry || entry.frontmatter.type !== 'hermes-drill') return undefined;
+    return this.drillFromEntry(entry);
   }
 
   getDrills(filters?: { dimension?: string; status?: string }): Drill[] {
-    if (!filters || (filters.dimension === undefined && filters.status === undefined)) {
-      return this.db
-        .prepare('SELECT * FROM drills ORDER BY priority ASC, created_at ASC')
-        .all() as Drill[];
+    let entries = this.adapter.findByType('hermes-drill');
+
+    if (filters?.dimension !== undefined) {
+      entries = entries.filter(e => e.frontmatter.dimension === filters.dimension);
+    }
+    if (filters?.status !== undefined) {
+      entries = entries.filter(e => e.frontmatter.status === filters.status);
     }
 
-    if (filters.dimension !== undefined && filters.status !== undefined) {
-      return this.db
-        .prepare(
-          'SELECT * FROM drills WHERE dimension = ? AND status = ? ORDER BY priority ASC, created_at ASC'
-        )
-        .all(filters.dimension, filters.status) as Drill[];
-    }
-
-    if (filters.dimension !== undefined) {
-      return this.db
-        .prepare(
-          'SELECT * FROM drills WHERE dimension = ? ORDER BY priority ASC, created_at ASC'
-        )
-        .all(filters.dimension) as Drill[];
-    }
-
-    return this.db
-      .prepare(
-        'SELECT * FROM drills WHERE status = ? ORDER BY priority ASC, created_at ASC'
-      )
-      .all(filters.status!) as Drill[];
+    return entries
+      .map(e => this.drillFromEntry(e))
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        return a.created_at.localeCompare(b.created_at);
+      });
   }
 
   completeDrill(id: string): void {
-    this.db
-      .prepare("UPDATE drills SET status = 'practiced' WHERE id = ?")
-      .run(id);
+    const entry = this.adapter.findById(id);
+    if (!entry) return;
+    this.adapter.updateFrontmatter(entry.relativePath, { status: 'practiced' });
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  private jdFromEntry(entry: { relativePath: string; frontmatter: Record<string, unknown> }): JobDescription {
+    const fm = entry.frontmatter;
+    const note = this.adapter.readNote(entry.relativePath);
+    // Body after the title heading is the raw_text
+    let rawText = '';
+    if (note) {
+      // Strip the leading "# Title\n\n" to get raw_text
+      rawText = note.body.replace(/^# .+\n\n/, '').trim();
+    }
+    return {
+      id: fm.id as string,
+      title: fm.title as string,
+      company: (fm.company as string) ?? null,
+      raw_text: rawText,
+      requirements: (fm.requirements as string) ?? null,
+      seniority_level: (fm.seniority_level as string) ?? null,
+      created_at: fm.created_at as string,
+    };
+  }
+
+  private sessionFromEntry(entry: { relativePath: string; frontmatter: Record<string, unknown> }): Session {
+    const fm = entry.frontmatter;
+    const note = this.adapter.readNote(entry.relativePath);
+
+    // Extract plan from body
+    let plan: string | null = null;
+    let overallFeedback: string | null = null;
+    if (note) {
+      const planMatch = note.body.match(/## Plan\n\n([\s\S]*?)(?=\n## Debrief)/);
+      if (planMatch && planMatch[1].trim()) {
+        plan = planMatch[1].trim();
+      }
+
+      const debriefMatch = note.body.match(/## Debrief\n\n(?:\*\*Overall Score:\*\* \d+\/5\n\n)?([\s\S]*?)$/);
+      if (debriefMatch && debriefMatch[1].trim()) {
+        overallFeedback = debriefMatch[1].trim();
+      }
+    }
+
+    return {
+      id: fm.id as string,
+      jd_id: fm.jd_id as string,
+      status: fm.status as string,
+      plan,
+      overall_score: fm.overall_score != null ? Number(fm.overall_score) : null,
+      overall_feedback: overallFeedback,
+      created_at: fm.created_at as string,
+      completed_at: (fm.completed_at as string) ?? null,
+    };
+  }
+
+  private roundFromEntry(entry: { relativePath: string; frontmatter: Record<string, unknown> }): Round {
+    const fm = entry.frontmatter;
+    const note = this.adapter.readNote(entry.relativePath);
+    let questions: string | null = null;
+    if (note) {
+      const qMatch = note.body.match(/## Questions\n\n([\s\S]*?)(?=\n## Exchanges)/);
+      if (qMatch && qMatch[1].trim()) {
+        questions = qMatch[1].trim();
+      }
+    }
+    return {
+      id: fm.id as string,
+      session_id: fm.session_id as string,
+      round_number: fm.round_number as number,
+      type: fm.round_type as string,
+      title: fm.title as string,
+      status: fm.status as string,
+      questions,
+      started_at: (fm.started_at as string) ?? null,
+      completed_at: (fm.completed_at as string) ?? null,
+    };
+  }
+
+  private drillFromEntry(entry: { relativePath: string; frontmatter: Record<string, unknown> }): Drill {
+    const fm = entry.frontmatter;
+    const note = this.adapter.readNote(entry.relativePath);
+    let exerciseText = '';
+    if (note) {
+      exerciseText = note.body.replace(/^# .+\n\n/, '').trim();
+    }
+    return {
+      id: fm.id as string,
+      session_id: fm.session_id as string,
+      round_id: (fm.round_id as string) ?? null,
+      dimension: fm.dimension as string,
+      exercise_text: exerciseText,
+      priority: fm.priority as number,
+      status: fm.status as string,
+      created_at: fm.created_at as string,
+    };
   }
 }
