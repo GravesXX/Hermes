@@ -7,19 +7,22 @@ export function registerJdTools(api: PluginAPI, db: HermesDB): void {
     name: 'hermes_jd_ingest',
     description: 'Ingest a job description to prepare for a mock interview session',
     parameters: {
-      text: {
-        type: 'string',
-        description: 'The full text of the job description',
-        required: true,
+      type: 'object' as const,
+      properties: {
+        text: {
+          type: 'string',
+          description: 'The full text of the job description',
+        },
+        title: {
+          type: 'string',
+          description: 'Job title (e.g. "Senior Software Engineer")',
+        },
+        company: {
+          type: 'string',
+          description: 'Company name',
+        },
       },
-      title: {
-        type: 'string',
-        description: 'Job title (e.g. "Senior Software Engineer")',
-      },
-      company: {
-        type: 'string',
-        description: 'Company name',
-      },
+      required: ['text'],
     },
     execute: async (_id, params) => {
       const rawText = params.text as string;
@@ -36,7 +39,10 @@ export function registerJdTools(api: PluginAPI, db: HermesDB): void {
   api.registerTool({
     name: 'hermes_jd_list',
     description: 'List all ingested job descriptions',
-    parameters: {},
+    parameters: {
+      type: 'object' as const,
+      properties: {},
+    },
     execute: async () => {
       const jds = db.getAllJobDescriptions();
 

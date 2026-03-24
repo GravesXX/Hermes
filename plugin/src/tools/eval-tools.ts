@@ -14,11 +14,14 @@ export function registerEvalTools(
     name: 'hermes_round_evaluate',
     description: 'Return an evaluation prompt for the LLM to score a completed round on 7 dimensions',
     parameters: {
-      round_id: {
-        type: 'string',
-        description: 'ID of the completed round to evaluate',
-        required: true,
+      type: 'object' as const,
+      properties: {
+        round_id: {
+          type: 'string',
+          description: 'ID of the completed round to evaluate',
+        },
       },
+      required: ['round_id'],
     },
     execute: async (_id, params) => {
       const roundId = params.round_id as string;
@@ -44,11 +47,14 @@ export function registerEvalTools(
     name: 'hermes_session_debrief',
     description: 'Return a debrief prompt for the LLM to generate an overall session assessment',
     parameters: {
-      session_id: {
-        type: 'string',
-        description: 'ID of the session to debrief',
-        required: true,
+      type: 'object' as const,
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'ID of the session to debrief',
+        },
       },
+      required: ['session_id'],
     },
     execute: async (_id, params) => {
       const sessionId = params.session_id as string;
@@ -61,15 +67,18 @@ export function registerEvalTools(
     name: 'hermes_drill_generate',
     description: 'Return a drill generation prompt for the LLM to create practice exercises for weak dimensions',
     parameters: {
-      session_id: {
-        type: 'string',
-        description: 'ID of the session to generate drills for',
-        required: true,
+      type: 'object' as const,
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'ID of the session to generate drills for',
+        },
+        round_id: {
+          type: 'string',
+          description: 'ID of a specific round to scope drills to (optional — defaults to all rounds in the session)',
+        },
       },
-      round_id: {
-        type: 'string',
-        description: 'ID of a specific round to scope drills to (optional — defaults to all rounds in the session)',
-      },
+      required: ['session_id'],
     },
     execute: async (_id, params) => {
       const sessionId = params.session_id as string;

@@ -6,8 +6,14 @@ export interface PluginAPI {
 export interface ToolDefinition {
   name: string;
   description: string;
-  parameters: Record<string, ParameterDef>;
+  parameters: JsonSchemaObject;
   execute: (id: string, params: Record<string, unknown>) => Promise<McpToolResult>;
+}
+
+export interface JsonSchemaObject {
+  type: 'object';
+  properties: Record<string, ParameterDef>;
+  required?: string[];
 }
 
 export interface McpToolResult {

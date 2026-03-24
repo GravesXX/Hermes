@@ -8,9 +8,12 @@ export function registerTrackingTools(api: PluginAPI, tracker: Tracker, drillMgr
     name: 'hermes_history',
     description: 'View completed interview session history with scores',
     parameters: {
-      limit: {
-        type: 'string',
-        description: 'Maximum number of sessions to return (default: 10)',
+      type: 'object' as const,
+      properties: {
+        limit: {
+          type: 'string',
+          description: 'Maximum number of sessions to return (default: 10)',
+        },
       },
     },
     execute: async (_id, params) => {
@@ -24,14 +27,17 @@ export function registerTrackingTools(api: PluginAPI, tracker: Tracker, drillMgr
     name: 'hermes_drill_list',
     description: 'List practice drills, optionally filtered by dimension or status',
     parameters: {
-      dimension: {
-        type: 'string',
-        description: 'Filter drills by dimension (e.g. "star_structure", "depth")',
-      },
-      status: {
-        type: 'string',
-        description: 'Filter drills by status',
-        enum: ['pending', 'practiced'],
+      type: 'object' as const,
+      properties: {
+        dimension: {
+          type: 'string',
+          description: 'Filter drills by dimension (e.g. "star_structure", "depth")',
+        },
+        status: {
+          type: 'string',
+          description: 'Filter drills by status',
+          enum: ['pending', 'practiced'],
+        },
       },
     },
     execute: async (_id, params) => {
@@ -45,11 +51,14 @@ export function registerTrackingTools(api: PluginAPI, tracker: Tracker, drillMgr
     name: 'hermes_drill_complete',
     description: 'Mark a practice drill as practiced',
     parameters: {
-      drill_id: {
-        type: 'string',
-        description: 'ID of the drill to mark as practiced',
-        required: true,
+      type: 'object' as const,
+      properties: {
+        drill_id: {
+          type: 'string',
+          description: 'ID of the drill to mark as practiced',
+        },
       },
+      required: ['drill_id'],
     },
     execute: async (_id, params) => {
       const drillId = params.drill_id as string;
